@@ -1,0 +1,113 @@
+project:
+  name: ai-talent-intensity-index
+  contact_email_env: CONTACT_EMAIL
+  user_agent: ai-talent-intensity-index/0.1
+  random_seed: 20220701
+
+window:
+  start: "2024-01-01"
+  end: "2024-12-31"  # Test with just 2024 data
+
+paths:
+  raw: data/raw
+  external: data/external
+  interim: data/interim
+  processed: data/processed
+  orgs: data/orgs.csv
+  report: REPORT.md
+
+venues:
+  NeurIPS:
+    tier: "A*"
+    dblp_stream: "conf/nips"
+    aliases: ["NeurIPS", "NIPS", "Advances in Neural Information Processing Systems"]
+    openreview_group: "NeurIPS.cc/{year}/Conference"
+  ICML:
+    tier: "A*"
+    dblp_stream: "conf/icml"
+    aliases: ["ICML", "International Conference on Machine Learning", "Proceedings of Machine Learning Research"]
+    openreview_group: "ICML.cc/{year}/Conference"
+  ICLR:
+    tier: "A*"
+    dblp_stream: "conf/iclr"
+    aliases: ["ICLR", "International Conference on Learning Representations"]
+    openreview_group: "ICLR.cc/{year}/Conference"
+  ACL:
+    tier: "A*"
+    dblp_stream: "conf/acl"
+    aliases: ["ACL", "Annual Meeting of the Association for Computational Linguistics"]
+  EMNLP:
+    tier: "A"
+    dblp_stream: "conf/emnlp"
+    aliases: ["EMNLP", "Empirical Methods in Natural Language Processing"]
+  CVPR:
+    tier: "A*"
+    dblp_stream: "conf/cvpr"
+    aliases: ["CVPR", "Computer Vision and Pattern Recognition"]
+  ICCV:
+    tier: "A"
+    dblp_stream: "conf/iccv"
+    aliases: ["ICCV", "International Conference on Computer Vision"]
+  ECCV:
+    tier: "A"
+    dblp_stream: "conf/eccv"
+    aliases: ["ECCV", "European Conference on Computer Vision"]
+  AAAI:
+    tier: "A"
+    dblp_stream: "conf/aaai"
+    aliases: ["AAAI", "AAAI Conference on Artificial Intelligence"]
+  COLM:
+    tier: "B"
+    dblp_stream: "conf/colm"
+    aliases: ["COLM", "Conference on Language Modeling"]
+    openreview_group: "colmweb.org/{year}/Conference"
+
+arxiv:
+  enabled: false
+  categories: ["cs.LG", "cs.CL", "cs.AI", "cs.CV"]
+  page_size: 1000
+  max_pages: null
+
+dblp:
+  enabled: true
+  endpoint: "https://sparql.dblp.org/sparql"
+
+openreview:
+  enabled: false
+  endpoint: "https://api2.openreview.net"
+  page_size: 1000
+
+openalex:
+  enabled: true
+  endpoint: "https://api.openalex.org"
+  api_key_env: OPENALEX_API_KEY
+  require_api_key: true
+  page_size: 100
+  source_sweep: true
+  max_pages_per_source: null
+  title_match_threshold: 0.985
+  enable_title_search: false  # Disable to avoid rate limits (19,544 works already matched!)
+
+semantic_scholar:
+  enabled: false
+  endpoint: "https://api.semanticscholar.org/graph/v1"
+  api_key_env: SEMANTIC_SCHOLAR_API_KEY
+  batch_size: 500
+
+csrankings:
+  enabled: true
+
+rate_limits:
+  dblp_seconds: 2.0
+  openreview_seconds: 0.25
+  openalex_seconds: 0.12
+  semantic_scholar_seconds: 1.0
+  arxiv_seconds: 3.0
+  csrankings_seconds: 2.0
+  timeout_seconds: 90
+  max_retries: 6
+
+qa:
+  disambiguation_authors: 100
+  minimum_works: 3
+

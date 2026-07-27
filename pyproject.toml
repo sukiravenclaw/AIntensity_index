@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-talent-collection"
+version = "0.1.0"
+description = "Reproducible public-scholarly-record collection pipeline for organizational AI talent research"
+requires-python = ">=3.9"
+dependencies = [
+  "pandas>=2.0,<3",
+  "pyarrow>=14,<22",
+  "PyYAML>=6,<7",
+  "requests>=2.31,<3",
+  "urllib3>=1.26,<2",
+]
+
+[project.scripts]
+ai-talent-collect = "src.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["src*"]

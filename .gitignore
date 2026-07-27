@@ -1,0 +1,11 @@
+data/raw/
+data/external/
+data/interim/
+data/processed/
+*.log
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+
