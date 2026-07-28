@@ -6,7 +6,7 @@ single offline HTML file. Run after `make collect`:
 
     python build_site.py
 """
-import html, re
+import html, re, json
 from pathlib import Path
 import pandas as pd
 import plotly.graph_objects as go
@@ -31,10 +31,12 @@ country_of=orgs.set_index("org_id")["country"].to_dict()
 GROUPS=[('Meta',('meta','facebook','fair')),('Alphabet / Google',('google','deepmind','alphabet','waymo')),
  ('Microsoft',('microsoft','msra')),('Amazon',('amazon',)),('Apple',('apple',)),('NVIDIA',('nvidia',)),
  ('Alibaba',('alibaba','damo')),('Tencent',('tencent',)),('ByteDance',('bytedance','tiktok')),('Baidu',('baidu',)),
- ('Huawei',('huawei','noah')),('Ant Group',('ant group','ant financial')),('Adobe',('adobe',)),('IBM',('ibm',)),
- ('Samsung',('samsung',)),('Intel',('intel',)),('OpenAI',('openai',)),('Anthropic',('anthropic',)),
- ('DeepSeek',('deepseek',)),('Xiaomi',('xiaomi',)),('JD.com',('jingdong','jd.com')),('Snap',('snapchat','snap inc')),
- ('Moonshot AI',('moonshot','kimi')),('Mistral AI',('mistral',)),('xAI',('xai','x.ai'))]
+ ('Huawei',('huawei','noah')),('Ant Group',('ant group','ant financial')),('Adobe',('adobe',)),
+ ('IBM',('ibm','international business mach')),('Samsung',('samsung',)),('Intel',('intel',)),('Tesla',('tesla',)),
+ ('OpenAI',('openai',)),('Anthropic',('anthropic',)),('DeepSeek',('deepseek',)),('Salesforce',('salesforce',)),
+ ('Xiaomi',('xiaomi',)),('JD.com',('jingdong','jd.com')),('Snap',('snapchat','snap inc')),
+ ('Moonshot AI',('moonshot','kimi')),('Mistral AI',('mistral',)),('xAI',('xai','x.ai')),('Cohere',('cohere',)),
+ ('Zhipu AI',('zhipu',)),('Sony',('sony',)),('Bosch',('bosch',)),('Qualcomm',('qualcomm',))]
 def group_label(oid):
     if oid is None or (isinstance(oid,float) and pd.isna(oid)): return None
     n=str(name_of.get(oid,oid)); t=type_of.get(oid,'')
@@ -93,8 +95,32 @@ feed=pe[pe.grp==top_firm].merge(training[["author_dblp_pid","training_org_id"]],
 feed["inst"]=feed["training_org_id"].map(group_label)
 feed_rank=feed.dropna(subset=["inst"]).groupby("inst")["author_dblp_pid"].nunique().sort_values(ascending=False).head(10)
 
+# ---- campus -> company flow (institution -> industry firm), for the interactive drill-down + treemap ----
+_ei=employer.dropna(subset=["employer_org_id"]).copy(); _ei["company"]=_ei["employer_org_id"].map(group_label)
+_ei=_ei[_ei["company"].map(is_ind)][["author_dblp_pid","company"]].drop_duplicates("author_dblp_pid")
+_ti=training.dropna(subset=["training_org_id"]).copy(); _ti["inst"]=_ti["training_org_id"].map(group_label)
+_ti=_ti[["author_dblp_pid","inst"]].dropna().drop_duplicates("author_dblp_pid")
+flow_ic=(_ti.merge(_ei,on="author_dblp_pid",how="inner")
+            .groupby(["inst","company"])["author_dblp_pid"].nunique().reset_index(name="n"))
+inst_ind_total=flow_ic.groupby("inst")["n"].sum().sort_values(ascending=False).head(15)
+
+def firms_for(inst,topn=10):
+    sub=flow_ic[flow_ic["inst"]==inst].sort_values("n",ascending=False)
+    total=int(sub["n"].sum()); head=sub.head(topn); tail=int(sub["n"].iloc[topn:].sum())
+    labels=list(head["company"]); counts=[int(x) for x in head["n"]]
+    if tail>0: labels.append("Other"); counts.append(tail)
+    return labels,counts,total
+
+FLOW_JSON=[]
+for _inst in inst_ind_total.index:
+    _lab,_cnt,_tot=firms_for(_inst)
+    FLOW_JSON.append({"inst":_inst,"total":_tot,
+        "companies":[{"company":c,"count":n,"prop":round(n/_tot,4)} for c,n in zip(_lab,_cnt)]})
+FLOW_DATA=json.dumps(FLOW_JSON)
+
 S=dict(talent=len(persons),works=len(works),auth=len(auth),orgs=len(orgs),
-       employed=len(employer),trained=len(training),firms=int(gi.shape[0]))
+       employed=len(employer),trained=len(training),firms=int(gi.shape[0]),
+       flow_people=int(flow_ic["n"].sum()))
 
 # ---- plotly helpers ----
 FONT="system-ui,-apple-system,'Segoe UI',Roboto,sans-serif"
@@ -128,15 +154,92 @@ def heat(mat,xlabel,ylabel):
     _lay(fig,44*len(mat.index)+190); fig.update_layout(margin=dict(l=8,r=8,t=8,b=96))
     return _div(fig)
 
+# ---- drill-down treemap: university -> firm, with luminance-aware text + no grey frame ----
+ACCENT="#0d366b"
+def _hex2rgb(h): n=int(h.lstrip('#'),16); return ((n>>16)&255,(n>>8)&255,n&255)
+_SC=[(p,_hex2rgb(h)) for p,h in BLUESCALE]
+def _scale_rgb(t):
+    t=min(max(t,0.0),1.0)
+    for (p0,c0),(p1,c1) in zip(_SC,_SC[1:]):
+        if t<=p1:
+            f=0 if p1==p0 else (t-p0)/(p1-p0); return tuple(c0[k]+f*(c1[k]-c0[k]) for k in range(3))
+    return _SC[-1][1]
+def treemap():
+    ids,labs,par,val=[],[],[],[]
+    for rec in FLOW_JSON:
+        ids.append(rec["inst"]); labs.append(rec["inst"]); par.append(""); val.append(rec["total"])
+        for c in rec["companies"]:
+            ids.append(f'{rec["inst"]} | {c["company"]}'); labs.append(c["company"])
+            par.append(rec["inst"]); val.append(c["count"])
+    cmax=max(val) if val else 1
+    def tc(v):
+        r,g,b=_scale_rgb(v/cmax); return '#ffffff' if (0.2126*r+0.7152*g+0.0722*b)/255<0.6 else INK
+    fig=go.Figure(go.Treemap(ids=ids,labels=labs,parents=par,values=val,branchvalues="total",maxdepth=2,
+        marker=dict(colors=val,colorscale=BLUESCALE,cmin=0,cmax=cmax,line=dict(color=SURF,width=1.5),cornerradius=4),
+        root_color="rgba(0,0,0,0)",tiling=dict(packing="squarify",pad=1),
+        texttemplate="%{label}<br>%{value} · %{percentParent:.0%}",textposition="middle center",
+        textfont=dict(size=12,color=[tc(v) for v in val]),
+        pathbar=dict(visible=True,thickness=20),
+        hovertemplate="<b>%{label}</b><br>%{value} people · %{percentParent:.0%} of parent<extra></extra>"))
+    fig.update_layout(height=540,margin=dict(l=4,r=4,t=4,b=4),paper_bgcolor=SURF,plot_bgcolor=SURF,
+        font=dict(family=FONT,size=12,color=INK))
+    return _div(fig)
+
+# ---- client-side interactive: click a university bar -> its campus->company Sankey (plain string; braces are JS, not f-string) ----
+JS_BLOCK="<script>\nconst FLOW = "+FLOW_DATA+";\n"+r"""
+(function(){
+  const INK='#0b0b0b',SEC='#52514e',MUT='#898781',SURF='#ffffff',GRID='#e6e5df',ACC='#0d366b';
+  const FONT="system-ui,-apple-system,'Segoe UI',Roboto,sans-serif";
+  const STOPS=['#cde2fb','#86b6ef','#3987e5','#256abf','#0d366b'];
+  const CFG={displayModeBar:false,responsive:true};
+  const order=FLOW.slice().reverse();                 // bottom-up so the leader sits on top
+  function shade(v,mx){const t=mx?v/mx:0;return STOPS[Math.min(STOPS.length-1,Math.floor(t*STOPS.length))];}
+  function rgba(h,a){const n=parseInt(h.slice(1),16);return 'rgba('+((n>>16)&255)+','+((n>>8)&255)+','+(n&255)+','+a+')';}
+  function barColors(sel){return order.map(r=>r.inst===sel?ACC:'#a9c8f0');}
+  function drawBar(sel){
+    Plotly.react('flowbar',[{type:'bar',orientation:'h',
+      x:order.map(r=>r.total),y:order.map(r=>r.inst),
+      marker:{color:barColors(sel),line:{width:0}},
+      text:order.map(r=>r.total),textposition:'outside',textfont:{color:SEC,size:11},cliponaxis:false,
+      hovertemplate:'%{y}<br>%{x} to industry — click to drill<extra></extra>'}],
+      {height:440,margin:{l:212,r:34,t:8,b:42},paper_bgcolor:SURF,plot_bgcolor:SURF,
+       font:{family:FONT,size:12,color:INK},bargap:0.3,
+       xaxis:{title:{text:'talent → industry (authors)',font:{size:11,color:MUT}},gridcolor:GRID,zeroline:false,tickfont:{color:MUT,size:10}},
+       yaxis:{tickfont:{color:INK,size:11},automargin:true}},CFG);
+  }
+  function drawSankey(rec){
+    const comps=rec.companies,mx=Math.max.apply(null,comps.map(c=>c.count));
+    const labels=[rec.inst].concat(comps.map(c=>c.company+' — '+Math.round(c.prop*100)+'%'));
+    const ncol=[ACC].concat(comps.map(c=>shade(c.count,mx)));
+    Plotly.react('flowsankey',[{type:'sankey',arrangement:'snap',
+      node:{label:labels,color:ncol,pad:15,thickness:16,line:{color:'white',width:1.2},hovertemplate:'%{label}<extra></extra>'},
+      link:{source:comps.map(()=>0),target:comps.map((_,i)=>i+1),value:comps.map(c=>c.count),
+            color:comps.map(c=>rgba(shade(c.count,mx),0.45)),hovertemplate:'%{value} people<extra></extra>'}}],
+      {height:440,margin:{l:10,r:10,t:30,b:10},paper_bgcolor:SURF,font:{family:FONT,size:11,color:INK},
+       title:{text:'<b>'+rec.inst+'</b> → firms · <span style="color:#898781">'+rec.total+' to industry</span>',font:{size:13},x:0,xanchor:'left'}},CFG);
+  }
+  function init(){
+    if(!window.Plotly){return setTimeout(init,60);}
+    drawBar(FLOW[0].inst); drawSankey(FLOW[0]);
+    document.getElementById('flowbar').on('plotly_click',function(e){
+      if(!e.points||!e.points.length)return;
+      const inst=e.points[0].y, rec=FLOW.find(r=>r.inst===inst);
+      if(rec){drawSankey(rec); drawBar(inst);}
+    });
+  }
+  if(document.readyState!=='loading')init(); else document.addEventListener('DOMContentLoaded',init);
+})();
+</script>"""
+
 FIG={
  'inst':hbar(inst_rank,"scholars trained"),
  'lab':hbar(lab_rank,"trainees"),
  'bucket':hbar(bucket_counts,"scholars"),
  'dest':hbar(top_dest,"scholars hired"),
- 'inten':hbar(inten_rank,"intensity (0–100)",fmt="{:.1f}"),
  'labflow':heat(mat,"firm","lab"),
  'country':heat(cm,"employer country","training country"),
  'feed':hbar(feed_rank,"scholars"),
+ 'treemap':treemap(),
 }
 INTERP={
  'inst':"Where the world's 2024–25 AI authors did their doctoral-era training. Chinese universities (Tsinghua, Peking, SJTU, "
@@ -148,25 +251,34 @@ INTERP={
    "stream. Employer resolution is partial, so treat these as lower bounds.",
  'dest':"Among industry-bound talent, Microsoft, Google/Alphabet and Meta lead alongside the Chinese giants (Alibaba, Tencent, "
    "ByteDance, Huawei, Ant) — the firms hiring the most top-venue authors.",
- 'inten':"The headline metric: each firm's talent mass, weighting every person by citations and publications (log-damped, "
-   "normalized within venue family) with a founder bonus, reconciled across duplicate org records and indexed 0–100.",
  'labflow':"Which training labs feed which firms. Hover any cell for the exact count — it reads as a supply chain from elite "
    "labs into the major industrial employers.",
  'country':"Training country → current-employer country. Domestic retention dominates (China→China, US→US), with a pronounced "
    "US↔China cross-border stream.",
  'feed':f"For the #1 firm ({html.escape(top_firm)}), the training institutions that supplied the most of its talent.",
+ 'flow':"Click any university on the left to redraw the Sankey on the right: exactly which firms its industry-bound "
+   "talent joined, with each firm's share of that university's industry hires on the node label. Counts are lower "
+   "bounds (employer resolved for a minority of talent), so read the mix and direction rather than the absolute size.",
+ 'treemap':"The same campus→company flow as a treemap. Click a university tile to zoom into its firms; click the "
+   "breadcrumb bar to zoom back out. Tile size and shade encode people; the label shows each firm's share of its university.",
 }
 def card(key,title):
     return (f'<figure><h3>{html.escape(title)}</h3>{FIG[key]}'
             f'<p class="interp">{INTERP[key]}</p></figure>')
 
-rows="".join(f"<tr><td class='r'>{i+1}</td><td>{html.escape(x.grp)}</td>"
-             f"<td class='n'>{x.idx:.1f}</td><td class='n'>{int(x.n)}</td></tr>" for i,x in enumerate(top.itertuples()))
+MEDAL={1:'👑',2:'🥈',3:'🥉'}
+rows="".join(
+    (f"<tr class='lead-row'>" if i==0 else "<tr>")
+    +f"<td class='r'>{MEDAL.get(i+1,str(i+1))}</td>"
+    +f"<td>{html.escape(x.grp)}</td>"
+    +f"<td class='meter-cell'><span class='meter'><i style='width:{x.idx:.0f}%'></i></span><span class='mv'>{x.idx:.1f}</span></td>"
+    +f"<td class='n'>{int(x.n)}</td></tr>"
+    for i,x in enumerate(top.itertuples()))
 def stat(n,l): return f'<div class="stat"><div class="n">{n}</div><div class="l">{l}</div></div>'
 
 HTML=f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>The Global AI Talent Flow</title>
+<title>AI Talent Intensity — Person-Centric Bibliometric</title>
 <script type="text/javascript">{get_plotlyjs()}</script>
 <style>
 :root{{--surface:#fcfcfb;--ink:#0b0b0b;--sec:#52514e;--muted:#898781;--blue:#2a78d6;--blue-l:#5598e7;
@@ -197,17 +309,27 @@ figure{{margin:22px 0 0;background:var(--card);border:1px solid var(--grid);bord
 box-shadow:0 1px 2px rgba(11,11,11,.04),0 10px 30px rgba(11,11,11,.06)}}
 figure h3{{margin:.1em 0 .3em;font-size:1.16rem;letter-spacing:-.01em}}
 .interp{{color:var(--sec);font-size:.96rem;margin:1.1em 2px 0}}
+.flowgrid{{display:grid;grid-template-columns:.82fr 1.18fr;gap:16px;align-items:start}}
+.flowgrid>div{{min-height:440px}}
+@media(max-width:760px){{.flowgrid{{grid-template-columns:1fr}}}}
 .tbl{{margin:22px 0 0;background:var(--card);border:1px solid var(--grid);border-radius:18px;overflow:hidden;box-shadow:0 10px 30px rgba(11,11,11,.06)}}
 table{{border-collapse:collapse;width:100%;font-size:.96rem}}
 th,td{{padding:11px 16px;border-bottom:1px solid var(--grid);text-align:left}}
 tr:last-child td{{border-bottom:none}} th{{color:var(--muted);font-weight:600;font-size:.74rem;text-transform:uppercase;letter-spacing:.06em;background:#faf9f6}}
-td.r{{color:var(--muted);width:38px;font-variant-numeric:tabular-nums}} td.n,th.n{{text-align:right;font-variant-numeric:tabular-nums}} td:nth-child(2){{font-weight:600}}
+td.r{{width:46px;text-align:center;font-size:1.1rem;line-height:1;color:var(--muted);font-variant-numeric:tabular-nums}} td.n,th.n{{text-align:right;font-variant-numeric:tabular-nums}} td:nth-child(2){{font-weight:600}}
+tr.lead-row{{background:linear-gradient(90deg,#eef5fd 0%,rgba(238,245,253,0) 70%)}}
+tr.lead-row td:nth-child(2){{color:var(--blue)}}
+.meter-cell{{white-space:nowrap}}
+.meter{{display:inline-block;width:74px;height:7px;background:var(--grid);border-radius:4px;overflow:hidden;vertical-align:middle;margin-right:9px}}
+.meter i{{display:block;height:100%;background:var(--blue);border-radius:4px}}
+.mv{{font-variant-numeric:tabular-nums;font-weight:600;color:var(--sec)}}
+.prov{{margin-left:7px;font-size:.6rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#9a7b2a;background:#fff5e0;border:1px solid #f0dcae;border-radius:10px;padding:1px 7px;vertical-align:middle}}
 .caveat{{margin-top:22px;background:var(--amber-bg);border:1px solid var(--amber-bd);border-radius:16px;padding:20px 24px}}
 .caveat h3{{margin:.1em 0 .5em;font-size:1.1rem}} .caveat li{{margin:.3em 0;color:#5a4a2a}}
 footer{{color:var(--muted);font-size:.85rem;margin-top:54px;border-top:1px solid var(--grid);padding-top:22px}}
 </style></head><body>
 <section class="hero"><div class="wrap">
-<div class="eyebrow">Global AI Talent · person-centric bibliometric study</div>
+<div class="eyebrow">AI Intensity · person-centric bibliometric study</div>
 <h1>Where the world's <span class="hl">AI talent</span> trains — and where it goes</h1>
 <p class="sub">A lab- and company-level map of elite AI researchers, reconstructed from public scholarly records.</p>
 <div class="stats">{stat(f"{S['talent']:,}","scholars identified")}{stat(f"{S['works']:,}","papers scanned")}{stat(f"{S['orgs']:,}","organizations mapped")}</div>
@@ -217,21 +339,29 @@ advisor, and <b>map</b> affiliations to a curated organization registry — trac
 </div></section>
 <main class="wrap">
 <section class="sec"><div class="sec-head"><div class="badge">1</div><h2>How firms rank on AI-talent intensity</h2></div>
-<p class="lead">The headline result — citation- and publication-weighted talent mass per firm, indexed 0–100.</p>
-{card('inten','AI Talent Intensity Index')}
-<div class="tbl"><table><thead><tr><th class="r">#</th><th>Firm</th><th class="n">Intensity</th><th class="n">Scholars</th></tr></thead><tbody>{rows}</tbody></table></div>
+<p class="lead">A provisional ranking of firms by the volume and citation-weight of the top-venue talent they employ.
+The intensity score is still experimental and not yet formally defined — read the <em>ordering</em> as indicative, not the exact values.</p>
+<div class="tbl"><table><thead><tr><th class="r">#</th><th>Firm</th><th>Talent-intensity index<span class="prov">provisional</span></th><th class="n">Scholars</th></tr></thead><tbody>{rows}</tbody></table></div>
+<p class="interp" style="margin-left:2px">Bars are scaled to the leader (index&nbsp;=&nbsp;100); “Scholars” is the count of resolved employees in the talent set. See <em>How to read these numbers</em> below for how the score is currently computed.</p>
 </section>
-<section class="sec"><div class="sec-head"><div class="badge">2</div><h2>The top AI labs in the world</h2></div>
-<p class="lead">Where talent is produced — by institution, then by individual lab (institution + advisor).</p>
-{card('inst','Top training institutions')}{card('lab','Top labs (institution + advisor)')}
+<section class="sec"><div class="sec-head"><div class="badge">2</div><h2>Where the world's AI talent trains</h2></div>
+<p class="lead">Start with supply: the institutions and individual labs (institution + advisor) that educate the most 2024–25 top-venue authors.</p>
+{card('inst','Top training institutions — where the most authors at top AI conferences (2024–25) trained')}{card('lab','Top advisors — who mentored the most authors at top AI conferences (2024–25)')}
 </section>
-<section class="sec"><div class="sec-head"><div class="badge">3</div><h2>Where AI talent went</h2></div>
-<p class="lead">Most researchers stay in academia; the flow into industry is the smaller, high-value stream.</p>
+<section class="sec"><div class="sec-head"><div class="badge">3</div><h2>Where that talent goes: academia vs industry</h2></div>
+<p class="lead">Of scholars whose current employer we could resolve, most stay in academia; the flow into industry is the smaller, high-value stream — and these are the firms hiring the most of it.</p>
 {card('bucket','Where talent sits now')}{card('dest','Top industry destinations')}
 </section>
-<section class="sec"><div class="sec-head"><div class="badge">4</div><h2>Flows &amp; pipelines</h2></div>
-<p class="lead">From training labs into firms, and across borders. Hover any cell for exact counts.</p>
-{card('country','Cross-border talent flow')}{card('feed','Which labs feed the #1 firm')}
+<section class="sec"><div class="sec-head"><div class="badge">4</div><h2>From campus to company</h2></div>
+<p class="lead">Now zoom into the industry stream: for each top university, exactly which firms did its talent join? Click a university to trace its flow.</p>
+<figure><h3>University → firm — click a university to drill in</h3>
+<div class="flowgrid"><div id="flowbar"></div><div id="flowsankey"></div></div>
+<p class="interp">{INTERP['flow']}</p></figure>
+{card('treemap','Drill-down treemap: university → firm')}
+</section>
+<section class="sec"><div class="sec-head"><div class="badge">5</div><h2>Pipelines &amp; borders</h2></div>
+<p class="lead">The finer-grained supply chain — from individual labs into firms, and across national borders. Hover any cell for exact counts.</p>
+{card('labflow','Lab → firm flow')}{card('country','Cross-border talent flow')}{card('feed','Which labs feed the #1 firm')}
 </section>
 <section class="sec"><div class="sec-head"><div class="badge">!</div><h2>How to read these numbers</h2></div>
 <div class="caveat"><h3>Honest caveats</h3><ul>
@@ -244,7 +374,7 @@ destination <em>counts</em> are lower bounds, <em>rankings</em> are robust.</li>
 </ul></div></section>
 <footer>Built from public scholarly records · seed window 2024–2025 · interactive figures regenerated from the analysis pipeline.
 Unlike MacroPolo's manually-verified, country-level tracker on three ML venues, this automates a lab- and company-level map across nine venues.</footer>
-</main></body></html>"""
+</main>{JS_BLOCK}</body></html>"""
 
 out=ROOT/"talent_flow_findings.html"
 out.write_text(HTML,encoding="utf-8")
