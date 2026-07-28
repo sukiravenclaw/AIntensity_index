@@ -34,6 +34,7 @@ WORKS_SCHEMA = pa.schema(
 AUTHORSHIPS_SCHEMA = pa.schema(
     [
         ("work_id", pa.string()),
+        ("author_dblp_pid", pa.string()),
         ("author_openalex_id", pa.string()),
         ("author_s2_id", pa.string()),
         ("orcid", pa.string()),
@@ -50,6 +51,53 @@ AUTHORSHIPS_SCHEMA = pa.schema(
         ("org_id", pa.string()),
         ("retrieved_at", pa.timestamp("us", tz="UTC")),
         ("source", pa.string()),
+    ]
+)
+
+
+# Person-level tables. In the OpenAlex-free model, institution is a property of
+# the person, not the work — these hold the derived training and employment facts.
+PERSONS_SCHEMA = pa.schema(
+    [
+        ("author_dblp_pid", pa.string()),
+        ("display_name", pa.string()),
+        ("orcid", pa.string()),
+        ("s2_author_id", pa.string()),
+        ("homepage_url", pa.string()),
+        ("first_pub_year", pa.int32()),
+        ("n_pubs", pa.int32()),
+        ("n_pubs_seed", pa.int32()),
+        ("citations_total", pa.int64()),
+        ("h_index", pa.int32()),
+        ("retrieved_at", pa.timestamp("us", tz="UTC")),
+        ("source", pa.string()),
+    ]
+)
+
+PERSON_TRAINING_SCHEMA = pa.schema(
+    [
+        ("author_dblp_pid", pa.string()),
+        ("training_org_id", pa.string()),
+        ("advisor_dblp_pid", pa.string()),
+        ("advisor_name", pa.string()),
+        ("advisor_alt_dblp_pid", pa.string()),
+        ("method", pa.string()),
+        ("confidence", pa.float64()),
+        ("n_advisor_copubs", pa.int32()),
+        ("training_start_year", pa.int32()),
+        ("training_end_year", pa.int32()),
+    ]
+)
+
+PERSON_EMPLOYER_SCHEMA = pa.schema(
+    [
+        ("author_dblp_pid", pa.string()),
+        ("employer_org_id", pa.string()),
+        ("source", pa.string()),
+        ("confidence", pa.float64()),
+        ("as_of_year", pa.int32()),
+        ("is_founder", pa.bool_()),
+        ("founded_org_id", pa.string()),
     ]
 )
 
@@ -71,10 +119,15 @@ def write_parquet(frame: pd.DataFrame, path: str | Path, schema: pa.Schema) -> N
         output["publication_date"] = pd.to_datetime(
             output["publication_date"], errors="coerce"
         ).dt.date
-    for column in ("publication_year", "n_authors", "n_institutions", "cited_by_count"):
+    int_columns = (
+        "publication_year", "n_authors", "n_institutions", "cited_by_count",
+        "first_pub_year", "n_pubs", "n_pubs_seed", "h_index", "citations_total",
+        "as_of_year", "n_advisor_copubs", "training_start_year", "training_end_year",
+    )
+    for column in int_columns:
         if column in output:
             output[column] = pd.to_numeric(output[column], errors="coerce")
-    for column in ("fwci", "citation_normalized_percentile", "fractional_credit"):
+    for column in ("fwci", "citation_normalized_percentile", "fractional_credit", "confidence"):
         if column in output:
             output[column] = pd.to_numeric(output[column], errors="coerce")
     table = pa.Table.from_pandas(output, schema=schema, preserve_index=False, safe=False)

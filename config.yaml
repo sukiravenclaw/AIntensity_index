@@ -6,7 +6,7 @@ project:
 
 window:
   start: "2024-01-01"
-  end: "2024-12-31"  # Test with just 2024 data
+  end: "2025-12-31"  # Seed = top-venue authors 2024-2025; per-person history backtracks further
 
 paths:
   raw: data/raw
@@ -78,7 +78,7 @@ openreview:
   page_size: 1000
 
 openalex:
-  enabled: true
+  enabled: false  # OFF: API limit reached. DBLP is now the person/graph spine.
   endpoint: "https://api.openalex.org"
   api_key_env: OPENALEX_API_KEY
   require_api_key: true
@@ -89,13 +89,31 @@ openalex:
   enable_title_search: false  # Disable to avoid rate limits (19,544 works already matched!)
 
 semantic_scholar:
-  enabled: false
+  enabled: true  # Primary citation source now that OpenAlex is off.
   endpoint: "https://api.semanticscholar.org/graph/v1"
   api_key_env: SEMANTIC_SCHOLAR_API_KEY
   batch_size: 500
 
 csrankings:
   enabled: true
+
+dblp_person:
+  enabled: true
+  source: "dump"       # "dump" = one bulk dblp.xml.gz pass (full coverage, ~30-60min); "api" = per-PID crawl
+  # Full per-person publication history for the training backtrack.
+  endpoint: "https://dblp.org/pid"
+  max_pids: null       # null = all seed authors (dump path makes this cheap)
+  dump_url: "https://dblp.org/xml/dblp.xml.gz"
+  dtd_url: "https://dblp.org/xml/dblp.dtd"
+
+orcid:
+  enabled: true
+  endpoint: "https://pub.orcid.org/v3.0"  # Public API, no key required.
+  max_lookups: 12000   # cap on per-person employment lookups (talent, high-signal first)
+
+wikidata:
+  enabled: true
+  endpoint: "https://query.wikidata.org/sparql"
 
 rate_limits:
   dblp_seconds: 2.0
@@ -104,6 +122,9 @@ rate_limits:
   semantic_scholar_seconds: 1.0
   arxiv_seconds: 3.0
   csrankings_seconds: 2.0
+  dblp_person_seconds: 2.0
+  orcid_seconds: 0.25
+  wikidata_seconds: 1.5
   timeout_seconds: 90
   max_retries: 6
 

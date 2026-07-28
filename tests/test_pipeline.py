@@ -221,8 +221,9 @@ class OutputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "orgs.csv").write_text(
-                "org_id,display_name,ror,aliases\n"
-                "o1,Example Lab,https://ror.org/012345678,Example Research\n",
+                "org_id,canonical_name,org_type,parent_org_id,country,ror_ids,aliases\n"
+                "cmu,Carnegie Mellon University,academic,,US,,CMU|Carnegie Mellon\n"
+                "acme_ai,Acme AI,industry_lab,,US,,Acme AI|Acme\n",
                 encoding="utf-8",
             )
             cfg = {
@@ -280,30 +281,75 @@ class OutputTests(unittest.TestCase):
                     }
                 ]
             )
-            empty_seed = pd.DataFrame(columns=["source"])
-            with patch("src.pipeline.dblp.collect", return_value=empty_seed), patch(
-                "src.pipeline.openreview.collect", return_value=empty_seed
-            ), patch("src.pipeline.arxiv.collect", return_value=empty_seed), patch(
-                "src.pipeline.csrankings.collect", return_value=empty_seed
-            ), patch(
-                "src.pipeline.openalex.collect", return_value=(works, authorships)
-            ):
+            # OpenAlex-free scenario: Zhilin-Yang-like founder trained at CMU.
+            dblp_works = pd.DataFrame([
+                {"dblp_work_id": "w2024", "title": "Recent", "publication_year": 2024,
+                 "doi": None, "venue_normalized": "NeurIPS", "venue_raw": "NeurIPS",
+                 "retrieved_at": "2026-01-01T00:00:00+00:00", "source": "dblp"},
+            ])
+            dblp_auth = pd.DataFrame([
+                {"dblp_work_id": "w2024", "author_dblp_pid": "yang", "author_name": "Zhilin Yang",
+                 "author_position": "first", "author_ordinal": 1,
+                 "retrieved_at": "2026-01-01T00:00:00+00:00", "source": "dblp"},
+            ])
+            history = pd.DataFrame([
+                {"dblp_work_id": "w2016", "author_dblp_pid": "yang", "author_name": "Zhilin Yang",
+                 "author_orcid": None, "author_ordinal": 1, "author_position": "first",
+                 "publication_year": 2016, "venue_raw": "NeurIPS", "retrieved_at": "t", "source": "dblp_person"},
+                {"dblp_work_id": "w2016", "author_dblp_pid": "russ", "author_name": "Ruslan Salakhutdinov",
+                 "author_orcid": None, "author_ordinal": 2, "author_position": "last",
+                 "publication_year": 2016, "venue_raw": "NeurIPS", "retrieved_at": "t", "source": "dblp_person"},
+                {"dblp_work_id": "w2017", "author_dblp_pid": "yang", "author_name": "Zhilin Yang",
+                 "author_orcid": None, "author_ordinal": 1, "author_position": "first",
+                 "publication_year": 2017, "venue_raw": "NeurIPS", "retrieved_at": "t", "source": "dblp_person"},
+                {"dblp_work_id": "w2017", "author_dblp_pid": "russ", "author_name": "Ruslan Salakhutdinov",
+                 "author_orcid": None, "author_ordinal": 2, "author_position": "last",
+                 "publication_year": 2017, "venue_raw": "NeurIPS", "retrieved_at": "t", "source": "dblp_person"},
+                {"dblp_work_id": "w2024", "author_dblp_pid": "yang", "author_name": "Zhilin Yang",
+                 "author_orcid": None, "author_ordinal": 1, "author_position": "first",
+                 "publication_year": 2024, "venue_raw": "NeurIPS", "retrieved_at": "t", "source": "dblp_person"},
+            ])
+            faculty = pd.DataFrame([
+                {"name": "Ruslan Salakhutdinov", "affiliation": "Carnegie Mellon University",
+                 "normalized_name": "ruslan salakhutdinov", "org_id": "cmu", "orcid": None, "homepage": None},
+            ])
+            founders = pd.DataFrame([
+                {"org_id": "acme_ai", "company_label": "Acme AI", "founder_name": "Zhilin Yang",
+                 "founder_dblp_pid": "yang", "founder_orcid": None, "founder_qid": "Q1",
+                 "retrieved_at": "t", "source": "wikidata"},
+            ])
+            no_metrics = pd.DataFrame(columns=["author_dblp_pid", "s2_author_id", "citation_count", "h_index"])
+            empty_orcid = pd.DataFrame(columns=["orcid", "employer_name", "start_year", "is_current"])
+
+            with patch("src.pipeline.dblp.collect_authorships", return_value=(dblp_works, dblp_auth)), \
+                 patch("src.pipeline.dblp_person.collect", return_value=history), \
+                 patch("src.pipeline.csrankings.collect", return_value=faculty), \
+                 patch("src.pipeline.semantic_scholar.collect_citations",
+                       return_value=(dblp_works.rename(columns={"dblp_work_id": "work_id"}), no_metrics,
+                                     pd.DataFrame())), \
+                 patch("src.pipeline.orcid.collect", return_value=pd.DataFrame()), \
+                 patch("src.pipeline.orcid.most_recent_employer", return_value=empty_orcid), \
+                 patch("src.pipeline.wikidata.collect_founders", return_value=founders):
                 run(cfg)
-            expected = {
-                "works.parquet",
-                "authorships.parquet",
-                "mobility_events.parquet",
-                "orgs_unmatched.csv",
-                "disambiguation_sample.csv",
-                "mobility_validation.csv",
-            }
-            self.assertEqual(
-                {path.name for path in (root / "processed").iterdir()},
-                expected,
-            )
+
+            processed = root / "processed"
+            for rel in ("works.parquet", "authorships.parquet", "flow/persons.parquet",
+                        "flow/person_training.parquet", "flow/person_employer.parquet",
+                        "flow/company_intensity.csv"):
+                self.assertTrue((processed / rel).exists(), rel)
             self.assertTrue((root / "REPORT.md").exists())
-            stored = pd.read_parquet(root / "processed" / "authorships.parquet")
-            self.assertEqual(stored["org_id"].tolist(), ["o1"])
+            self.assertTrue((processed / "flow" / "FLOW_REPORT.md").exists())
+            self.assertTrue((processed / "flow" / "INTENSITY_REPORT.md").exists())
+
+            # Golden chain: training=CMU, employer=Acme (founder), flow edge present.
+            training = pd.read_parquet(processed / "flow" / "person_training.parquet")
+            self.assertEqual(training.loc[training.author_dblp_pid == "yang", "training_org_id"].iloc[0], "cmu")
+            employer = pd.read_parquet(processed / "flow" / "person_employer.parquet")
+            yang_emp = employer[employer.author_dblp_pid == "yang"].iloc[0]
+            self.assertEqual(yang_emp["employer_org_id"], "acme_ai")
+            self.assertTrue(bool(yang_emp["is_founder"]))
+            intensity_df = pd.read_csv(processed / "flow" / "company_intensity.csv")
+            self.assertIn("acme_ai", set(intensity_df["employer_org_id"]))
 
 
 def _authorship(work_id, ror, raw):

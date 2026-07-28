@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import logging
 from pathlib import Path
@@ -7,13 +8,19 @@ from typing import Any, Dict
 
 import pandas as pd
 
-from src.collect import arxiv, csrankings, dblp, openalex, openreview, semantic_scholar
+from src.collect import (
+    csrankings,
+    dblp,
+    dblp_dump,
+    dblp_person,
+    orcid,
+    semantic_scholar,
+    wikidata,
+)
 from src.config import ensure_directories
-from src.derive.mobility import derive_mobility_events
-from src.normalize.orgs import match_organizations, validate_org_file
-from src.qa.disambiguation import build_sample
-from src.qa.mobility_validation import validate_mobility
-from src.qa.report import write_report
+from src.derive import intensity, talent_flow
+from src.normalize.org_taxonomy import INDUSTRY_TYPES, SHELL_TYPES
+from src.normalize.orgs import validate_org_file
 from src.schemas import AUTHORSHIPS_SCHEMA, WORKS_SCHEMA, write_parquet
 
 
@@ -22,121 +29,192 @@ LOG = logging.getLogger("ai_talent_collection.pipeline")
 
 def run(cfg: Dict[str, Any]) -> None:
     ensure_directories(cfg)
-    # Fail before any network work if the required curated input is absent.
     validate_org_file(cfg["paths"]["orgs"])
     interim = Path(cfg["paths"]["interim"])
     processed = Path(cfg["paths"]["processed"])
 
-    dblp_records = dblp.collect(cfg)
-    _write_interim(dblp_records, interim / "dblp_venue_works.parquet")
-    _log_frame("dblp", dblp_records)
+    # 1. DBLP: venue-year seed + authorship (co-authorship) graph.
+    dblp_works, dblp_auth = dblp.collect_authorships(cfg)
+    works = dblp_works.rename(columns={"dblp_work_id": "work_id"})
+    authorships = dblp_auth.rename(columns={"dblp_work_id": "work_id"})
+    authorships = _finalize_authorships(authorships)
+    works = _attach_work_stats(works, authorships)
+    _log_frame("dblp_works", works)
+    _log_frame("dblp_authorships", authorships)
 
-    openreview_records = openreview.collect(cfg)
-    _write_interim(
-        openreview_records,
-        interim / "openreview_submissions.parquet",
+    # 2. Semantic Scholar: paper citations + author-level metrics keyed to PIDs.
+    works, s2_author_metrics, paper_crosswalk = semantic_scholar.collect_citations(
+        cfg, works, authorships
     )
-    _log_frame("openreview", openreview_records)
+    _log_frame("s2_author_metrics", s2_author_metrics)
 
-    arxiv_records = arxiv.collect(cfg)
-    _write_interim(arxiv_records, interim / "arxiv_preprints.parquet")
-    _log_frame("arxiv", arxiv_records)
+    # 3. DBLP per-person full history (the training backtrack). Order authors by
+    # seed-paper count (desc) so a max_pids cap keeps the highest-signal talent.
+    pids = _prioritized_pids(authorships)
+    history = _collect_history(cfg, pids, authorships)
+    _log_frame("dblp_person_history", history)
 
-    csrankings_records = csrankings.collect(cfg)
-    _write_interim(csrankings_records, interim / "csrankings.parquet")
-    _log_frame("csrankings", csrankings_records)
+    # 4. CSRankings faculty (academic anchor / advisor ground truth).
+    faculty = csrankings.collect(cfg)
+    _log_frame("csrankings", faculty)
 
-    works, authorships = openalex.collect(
+    # 5. ORCID current-employer signal (dated). Scoped to the talent (seed
+    # authors) in priority order and capped — ORCID is a per-person crawl, so
+    # querying every co-author's ORCID would be an hours-long unscoped sweep.
+    orcids = _talent_orcids(cfg, history, pids)
+    orcid_emp = orcid.collect(cfg, orcids)
+    orcid_recent = orcid.most_recent_employer(orcid_emp)
+
+    # 6. Wikidata founders (required for the founder column) + optional employer facts.
+    label_map = _company_labels(cfg["paths"]["orgs"])
+    founders = wikidata.collect_founders(cfg, label_map)
+    _log_frame("wikidata_founders", founders)
+    wikidata_employers = None
+    if cfg.get("wikidata", {}).get("person_facts", False):
+        facts = wikidata.collect_person_facts(cfg, pids)
+        if not facts.empty:
+            wikidata_employers = facts[facts["fact_type"] == "employer"]
+
+    # 7. Talent-flow derivation (persons, training, employer, flow matrix).
+    tf = talent_flow.run(
         cfg,
-        dblp_records,
-        openreview_records,
-        arxiv_records,
+        seed_authorships=authorships,
+        history=history,
+        faculty=faculty,
+        s2_metrics=s2_author_metrics,
+        wikidata_employers=wikidata_employers,
+        founders=founders,
+        orcid_recent=orcid_recent,
     )
-    _log_frame("openalex_works", works)
-    _log_frame("openalex_authorships", authorships)
 
-    works, authorships, s2_records = semantic_scholar.enrich(
+    # 8. Intensity index.
+    intensity.run(
         cfg,
-        works,
-        authorships,
-    )
-    # Citation-gap enrichment must precede collection-local metric fallbacks.
-    works = openalex.apply_metric_fallbacks(works)
-    if not s2_records.empty:
-        serializable = s2_records.copy()
-        serializable["external_ids"] = serializable["external_ids"].map(
-            lambda value: json.dumps(value, ensure_ascii=False, sort_keys=True)
-        )
-        _write_interim(
-            serializable,
-            interim / "semantic_scholar_crosswalk.parquet",
-        )
-    _log_frame("semantic_scholar", s2_records)
-
-    authorships, unmatched = match_organizations(
-        authorships,
-        cfg["paths"]["orgs"],
-    )
-    disambiguation = build_sample(
-        works,
-        authorships,
-        n_authors=int(cfg["qa"].get("disambiguation_authors", 100)),
-        minimum_works=int(cfg["qa"].get("minimum_works", 3)),
-        random_seed=int(cfg["project"].get("random_seed", 20220701)),
+        persons=tf["persons"],
+        seed_authorships=authorships,
+        works=works,
+        employers=tf["employers"],
+        training=tf["training"],
     )
 
-    # Derive mobility events from authorships
-    mobility_events = derive_mobility_events(works, authorships)
-    _log_frame("mobility_events", mobility_events)
-
-    # Validate mobility against CSRankings departures
-    mobility_validation = validate_mobility(
-        mobility_events,
-        csrankings_records,
-        authorships
-    )
-
+    # 9. Persist canonical + interim tables.
     _validate_outputs(works, authorships)
     write_parquet(works, processed / "works.parquet", WORKS_SCHEMA)
-    write_parquet(authorships, processed / "authorships.parquet", AUTHORSHIPS_SCHEMA)
+    authorships_out = authorships.rename(columns={"author_name": "author_display_name"})
+    write_parquet(authorships_out, processed / "authorships.parquet", AUTHORSHIPS_SCHEMA)
+    _write_interim(faculty, interim / "csrankings.parquet")
+    _write_interim(history, interim / "dblp_person_history.parquet")
+    _write_interim(s2_author_metrics, interim / "s2_author_metrics.parquet")
+    _write_interim(paper_crosswalk, interim / "s2_paper_crosswalk.parquet")
 
-    # Write mobility events as parquet
-    if not mobility_events.empty:
-        mobility_events.to_parquet(
-            processed / "mobility_events.parquet",
-            index=False,
-            engine="pyarrow",
-            compression="zstd"
-        )
-
-    unmatched.to_csv(processed / "orgs_unmatched.csv", index=False)
-    disambiguation.to_csv(processed / "disambiguation_sample.csv", index=False)
-    mobility_validation.to_csv(processed / "mobility_validation.csv", index=False)
-
-    write_report(
-        cfg["paths"]["report"],
-        works,
-        authorships,
-        unmatched,
-        disambiguation,
-        mobility_events,
-        mobility_validation,
-    )
+    _write_report(cfg, works, authorships, tf)
     LOG.info(
-        "stage=complete works=%d authorships=%d mobility=%d unmatched=%d qa_rows=%d",
+        "stage=complete works=%d authorships=%d persons=%d %s",
         len(works),
         len(authorships),
-        len(mobility_events),
-        len(unmatched),
-        len(disambiguation),
+        len(tf["persons"]),
+        tf["metrics"],
     )
+
+
+def _prioritized_pids(authorships: pd.DataFrame) -> list:
+    """Unique author PIDs ordered by seed-paper count (desc) — high signal first."""
+    if authorships.empty:
+        return []
+    counts = (
+        authorships.dropna(subset=["author_dblp_pid"])
+        .groupby("author_dblp_pid")["work_id"].nunique()
+        .sort_values(ascending=False)
+    )
+    return counts.index.tolist()
+
+
+def _talent_orcids(cfg: Dict[str, Any], history: pd.DataFrame, pids: list) -> list:
+    """Valid ORCIDs of seed authors, in priority order, capped by orcid.max_lookups."""
+    if history.empty or "author_orcid" not in history.columns:
+        return []
+    own = history.dropna(subset=["author_dblp_pid", "author_orcid"])
+    pid_orcid = (
+        own.drop_duplicates("author_dblp_pid")
+        .set_index("author_dblp_pid")["author_orcid"].to_dict()
+    )
+    seen: set = set()
+    ordered: list = []
+    for pid in pids:  # already highest-signal-first
+        cleaned = orcid._clean_orcid(pid_orcid.get(pid))
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            ordered.append(cleaned)
+    cap = cfg.get("orcid", {}).get("max_lookups")
+    if cap:
+        ordered = ordered[: int(cap)]
+    LOG.info("stage=orcid_scope talent_orcids=%d", len(ordered))
+    return ordered
+
+
+def _collect_history(cfg: Dict[str, Any], pids: list, authorships: pd.DataFrame) -> pd.DataFrame:
+    """Full per-person history via the bulk DBLP dump or the per-PID API."""
+    source = cfg.get("dblp_person", {}).get("source", "api")
+    if source == "dump":
+        pid_to_name = (
+            authorships.dropna(subset=["author_dblp_pid", "author_name"])
+            .drop_duplicates("author_dblp_pid")
+            .set_index("author_dblp_pid")["author_name"].to_dict()
+        )
+        max_pids = cfg.get("dblp_person", {}).get("max_pids")
+        target = pids[: int(max_pids)] if max_pids else pids
+        return dblp_dump.collect(cfg, target, pid_to_name)
+    return dblp_person.collect(cfg, pids)
+
+
+def _finalize_authorships(authorships: pd.DataFrame) -> pd.DataFrame:
+    if authorships.empty:
+        authorships["n_authors"] = pd.Series(dtype="int64")
+        authorships["fractional_credit"] = pd.Series(dtype="float64")
+        return authorships
+    n = authorships.groupby("work_id")["author_dblp_pid"].transform("nunique").clip(lower=1)
+    authorships = authorships.copy()
+    authorships["n_authors"] = n
+    authorships["fractional_credit"] = 1.0 / n
+    return authorships
+
+
+def _attach_work_stats(works: pd.DataFrame, authorships: pd.DataFrame) -> pd.DataFrame:
+    if works.empty:
+        return works
+    works = works.copy()
+    if "cited_by_count" not in works.columns:
+        works["cited_by_count"] = pd.NA  # populated by the S2 stage
+    if not authorships.empty:
+        n_authors = authorships.groupby("work_id")["author_dblp_pid"].nunique()
+        works["n_authors"] = works["work_id"].map(n_authors)
+    return works
+
+
+def _company_labels(org_path: str | Path) -> Dict[str, str]:
+    """label -> org_id for non-shell industry orgs (for the Wikidata founder query)."""
+    label_map: Dict[str, str] = {}
+    with Path(org_path).open("r", encoding="utf-8-sig", newline="") as handle:
+        for row in csv.DictReader(handle):
+            org_type = (row.get("org_type") or "").strip()
+            if org_type not in INDUSTRY_TYPES or org_type in SHELL_TYPES:
+                continue
+            org_id = (row.get("org_id") or "").strip()
+            if not org_id:
+                continue
+            labels = [row.get("canonical_name") or ""]
+            labels += (row.get("aliases") or "").split("|")
+            for label in labels:
+                label = label.strip()
+                if label:
+                    label_map.setdefault(label, org_id)
+    return label_map
 
 
 def _write_interim(frame: pd.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    if frame.empty:
-        # Pandas still writes a readable empty Parquet file when columns exist.
-        frame.to_parquet(path, index=False, engine="pyarrow")
+    if frame is None or frame.empty:
+        pd.DataFrame(frame if frame is not None else {}).to_parquet(path, index=False, engine="pyarrow")
     else:
         frame.to_parquet(path, index=False, engine="pyarrow", compression="zstd")
 
@@ -160,14 +238,41 @@ def _validate_outputs(works: pd.DataFrame, authorships: pd.DataFrame) -> None:
     unknown = set(authorships["work_id"].dropna()) - set(works["work_id"])
     if unknown:
         raise ValueError(f"authorships contains {len(unknown)} unknown work_id values")
-    allowed_decisions = {
-        "oral",
-        "spotlight",
-        "poster",
-        "rejected",
-        "preprint",
-        "unknown",
-    }
-    invalid = set(works["decision"].dropna()) - allowed_decisions
-    if invalid:
-        raise ValueError(f"Invalid decision values: {sorted(invalid)}")
+
+
+def _write_report(cfg: Dict[str, Any], works, authorships, tf) -> None:
+    metrics = tf["metrics"]
+    coverage = ""
+    if not works.empty and "venue_normalized" in works and "publication_year" in works:
+        counts = (
+            works.groupby(["venue_normalized", "publication_year"]).size()
+            .reset_index(name="works").sort_values(["venue_normalized", "publication_year"])
+        )
+        coverage = "\n".join(
+            f"| {r.venue_normalized} | {int(r.publication_year)} | {int(r.works)} |"
+            for r in counts.itertuples()
+        )
+    lines = [
+        "# Collection report (OpenAlex-free, person-centric)",
+        "",
+        "| Table | Rows |",
+        "|---|---:|",
+        f"| works.parquet | {len(works):,} |",
+        f"| authorships.parquet | {len(authorships):,} |",
+        f"| flow/persons.parquet | {metrics['total_talent']:,} |",
+        "",
+        "## Talent coverage",
+        "",
+        f"- With training lab: {metrics['with_training']:,} ({metrics['pct_with_training']}%)",
+        f"- With current employer: {metrics['with_employer']:,} ({metrics['pct_with_employer']}%)",
+        f"- Founders: {metrics['founders']:,}",
+        "",
+        "See `flow/FLOW_REPORT.md` and `flow/INTENSITY_REPORT.md` for detail.",
+        "",
+        "## Coverage by venue and year",
+        "",
+        "| venue_normalized | publication_year | works |",
+        "|---|---|---|",
+        coverage,
+    ]
+    Path(cfg["paths"]["report"]).write_text("\n".join(lines), encoding="utf-8")

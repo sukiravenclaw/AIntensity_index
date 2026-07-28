@@ -1,8 +1,25 @@
-# AI talent intensity index — collection pipeline v0.2
+# AI talent intensity index — pipeline v0.3 (OpenAlex-free, person-centric)
 
-This repository collects publication records and publication-listed
-affiliations only. It does not create scores, rankings, biographical fields, or
-persisted person profiles.
+This pipeline identifies AI talent (authors at top venues in 2024–2025),
+backtracks each person to their highest-education training lab and advisor,
+maps lab → current-employer flows, flags founders, and computes a per-company
+**talent-intensity index** weighted by citations and publications.
+
+**Architecture (OpenAlex is not used).** Institution is a property of the
+*person*, reconstructed from the DBLP full-publication history plus the
+CSRankings faculty co-authorship graph:
+
+- **DBLP** — person identity (`author_dblp_pid`), venue-year seed, co-authorship
+  graph, and full per-person history (`src/collect/dblp.py`, `dblp_person.py`).
+- **CSRankings** — authoritative faculty → institution anchor (`csrankings.py`).
+- **Semantic Scholar** — paper + author citation metrics (`semantic_scholar.py`).
+- **ORCID public API + Wikidata** — current employer and founders
+  (`orcid.py`, `wikidata.py`).
+
+Derivation lives in `src/derive/talent_flow.py` (persons, training/advisor,
+employer cascade, flow matrix) and `src/derive/intensity.py` (the index). The
+legacy affiliation-timeline prototype `src/flow/derive_talent_flow.py` is
+superseded and no longer wired into the pipeline.
 
 ## Attribution and licensing
 
@@ -45,13 +62,15 @@ make collect
 
 The end-to-end target writes:
 
-- `data/processed/works.parquet` — publication records
-- `data/processed/authorships.parquet` — author-work-institution rows with fractional credit
-- `data/processed/mobility_events.parquet` — derived academia-industry transitions
-- `data/processed/orgs_unmatched.csv` — QA: unmatched affiliation strings
-- `data/processed/disambiguation_sample.csv` — QA: author name collision sample
-- `data/processed/mobility_validation.csv` — QA: mobility vs CSRankings validation
-- `REPORT.md` — collection summary with coverage and validation metrics
+- `data/processed/works.parquet` — seed publications with S2 citation counts
+- `data/processed/authorships.parquet` — work → DBLP-PID authorship rows
+- `data/processed/flow/persons.parquet` — the talent set with career metrics
+- `data/processed/flow/person_training.parquet` — highest-education lab + advisor
+- `data/processed/flow/person_employer.parquet` — current employer (cascade + founder flag)
+- `data/processed/flow/flow_matrix.parquet` / `flow_matrix_published.csv` — lab → employer flows
+- `data/processed/flow/company_intensity.csv` — the per-company intensity index
+- `data/processed/flow/intensity_lab_decomposition.csv` — each company's intensity by source lab
+- `REPORT.md`, `flow/FLOW_REPORT.md`, `flow/INTENSITY_REPORT.md` — summaries
 
 Every HTTP response is stored under `data/raw/<source>/<content-hash>/` before
 status handling or parsing. A successful response also gets a canonical cache

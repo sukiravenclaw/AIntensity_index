@@ -7,6 +7,8 @@ from typing import Any, Dict
 import pandas as pd
 
 from src.common import RawCacheClient, utc_now
+from src.normalize.orgs import build_indexes, match_affiliation
+from src.normalize.text import normalize_text
 
 
 LOG = logging.getLogger("ai_talent_collection.csrankings")
@@ -66,13 +68,49 @@ def collect(cfg: Dict[str, Any]) -> pd.DataFrame:
     else:
         combined = pd.concat([current_records, old_records], ignore_index=True)
 
+    combined = _annotate_faculty(combined, cfg)
+
     LOG.info(
-        "stage=csrankings current=%d old=%d total=%d",
+        "stage=csrankings current=%d old=%d total=%d org_mapped=%d",
         len(current_records),
         len(old_records),
-        len(combined)
+        len(combined),
+        int(combined["org_id"].notna().sum()) if "org_id" in combined else 0,
     )
 
+    return combined
+
+
+def _annotate_faculty(combined: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
+    """Add a DBLP-canonical normalized name and an org_id for each faculty row.
+
+    ``normalized_name`` is the join key to the DBLP co-authorship graph (CSRankings
+    names are DBLP-canonical, carrying disambiguation suffixes). ``org_id`` maps
+    the faculty's institution to the curated org registry so a detected advisor
+    yields a training institution.
+    """
+    if combined.empty:
+        combined["normalized_name"] = pd.Series(dtype="object")
+        combined["org_id"] = pd.Series(dtype="object")
+        return combined
+
+    combined = combined.copy()
+    combined["normalized_name"] = combined["name"].map(normalize_text)
+
+    org_path = cfg["paths"]["orgs"]
+    try:
+        ror_map, alias_map = build_indexes(org_path)
+    except Exception as exc:  # missing/invalid org file should not kill collection
+        LOG.warning("stage=csrankings org_index_failed=%s", exc)
+        combined["org_id"] = None
+        return combined
+
+    unique_affils = combined["affiliation"].dropna().unique()
+    affil_to_org = {
+        affil: match_affiliation(affil, alias_map, ror_map=ror_map)
+        for affil in unique_affils
+    }
+    combined["org_id"] = combined["affiliation"].map(affil_to_org)
     return combined
 
 

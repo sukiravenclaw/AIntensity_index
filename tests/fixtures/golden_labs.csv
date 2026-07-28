@@ -1,0 +1,5 @@
+student_name,training_institution,advisor_name,advisor_alt,current_company,current_org_id,is_founder,notes
+Zhilin Yang,Carnegie Mellon University,Ruslan Salakhutdinov,William Cohen,Moonshot AI,moonshot,yes,"Primary golden case. Co-advised at CMU. Founded Moonshot AI (Kimi). Full-history backtrack must surface ~2015-2019 CMU papers."
+Ilya Sutskever,University of Toronto,Geoffrey Hinton,,Safe Superintelligence,safe_superintelligence,yes,"PhD Toronto under Hinton. Co-founded OpenAI then SSI."
+Chelsea Finn,University of California Berkeley,Sergey Levine,Pieter Abbeel,Physical Intelligence,physical_intelligence,yes,"PhD Berkeley (BAIR). Co-founded Physical Intelligence. Also Stanford faculty."
+Tri Dao,Stanford University,Christopher Re,Stefano Ermon,Together AI,together_ai,yes,"PhD Stanford under Chris Re. Chief Scientist / co-founder Together AI."
